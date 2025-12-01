@@ -1,0 +1,9 @@
+name: easy-peasy
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip=25.3
+  - pip:
+    - google-adk==1.19
+    - python-dotenv==1.2
