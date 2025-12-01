@@ -166,6 +166,85 @@ def state_checker(tool_context: ToolContext
         if not ("user:"+key in tool_context.state):
             return {"status": "success", "onboarding_needed": True}
     return {"status": "success", "onboarding_needed": False}
+
+def retrieve_user_info(tool_context: ToolContext
+                       ) -> Dict[str,Any]:
+    """Tool to retrieve the user info (city, ingredients_to_avoid, 
+    personal_recipes, meal_components and number_of_meals)
+
+    Returns:
+        Dict[str,Any]: a dictionary with the keys: user:city, user:ingredients_to_avoid, 
+    user:personal_recipes, user:meal_components and user:number_of_meals
+    """
+    user_dict = {}
+    for key in ["number_of_meals","meal_components", "city", "personal_recipes", "ingredients_to_avoid"]:
+        user_dict[key] = tool_context.state.get(key, "NA")
+    return {"status": "success", "user_info": user_dict}
+
+##### states for the app ####
+def save_grocery_list(
+    tool_context: ToolContext, grocery_list: List
+) -> Dict[str, Any]:
+    """
+    Tool to record a detailed list of ingredients for the user to do their groceries
+
+    Args:
+        grocery_list: A list of all the ingredients the user wil use to do groceries
+    """
+    # Write to session state using the 'user:' prefix for user data
+    tool_context.state["user:grocery_list"] = grocery_list
+    return {"status": "success", "grocery_list": grocery_list}
+
+def retrieve_grocery_list(tool_context: ToolContext) -> Dict[str, Any]:
+    """
+    Tool to retrieve the grocery list for this week for the user.
+
+    Returns:
+        grocery_list: A list of all the ingredients the user wil use to do groceries
+    """
+    # Read from session state
+    grocery_list = tool_context.state.get("user:grocery_list", [])
+    return {"status": "success", "grocery_list": grocery_list}
+
+def save_recipe_list(
+    tool_context: ToolContext, recipe_list: List
+) -> Dict[str, Any]:
+    """
+    Tool to record a detailed list of ingredients and recipes for the user to do their cooking
+
+    Args:
+        recipe_list: A list where each item is one complete recipe with ingredients and cooking instructions
+    """
+    # Write to session state using the 'user:' prefix for user data
+    tool_context.state["user:recipe_list"] = recipe_list
+    return {"status": "success", "recipe_list": recipe_list}
+
+def retrieve_recipe_list(tool_context: ToolContext) -> Dict[str, Any]:
+    """
+    Tool to retrieve the recipe list for this week for the user.
+
+    Returns:
+        recipe_list: A list where each item is one complete recipe with ingredients and cooking instructions
+    """
+    # Read from session state
+    recipe_list = tool_context.state.get("user:recipe_list", [])
+
+    return {"status": "success", "recipe_list": recipe_list}
+
+
+def set_new_week(
+    tool_context: ToolContext, is_new_week: bool
+) -> Dict[str, Any]:
+    """
+    Tool to check the state of the current week, whether it is a new week and 
+    the user is ready to get a new grocery_list
+
+    Returns:
+        dictionary: a dictionary that sais whether the tool call was successful and what value was stored
+    """
+    tool_context.state["user:is_new_week"] = is_new_week
+    return {"status": "success", "is_new_week": is_new_week}
+
 #####################
 
 
@@ -301,8 +380,10 @@ ingredients_in_season_agent = Agent(
         model="gemini-2.5-flash-lite",
         retry_options=retry_config
     ),
+    description="Agent that creates a list of ingredients that are in season",
     instruction="""You are a specialized research agent. Your only job is to use the
-    google_search tool to find 5-6 ingredients in season for {user:city}. 
+    google_search tool to find 5-6 ingredients in season for {user:city} for 
+    the current month, which you can find with `get_current_month` tool . 
     Return only the list of 5-6 ingredients and nothing else""",
     tools=[google_search],
     output_key="ingredients_list",  # The result of this agent will be stored in the session state with this key.
@@ -327,41 +408,118 @@ ingredients_in_season_agent = Agent(
 #     Return only the list of ingredients and nothing else"""
 
 # Recipe Agent: Its job is to find recipes that contain the ingredients it recieves
+
 recipe_agent = Agent(
     name="RecipeAgent",
     model=Gemini(
         model="gemini-2.5-flash-lite",
         retry_options=retry_config
     ),
-    instruction="""Use the ingredient list: {ingredients_list} and the meal
+    description="Agent that creates a list of recipes based on a list of ingredients",
+
+    instruction="""Check the current user state variables to refresh your memory.
+    Then use the ingredient list: {ingredients_list} and the meal
     components {user:meal_components} to find     {user:number_of_meals} 
     recipes that contain at least one of the ingredients
     found in the ingredient list. Make sure each recipe contains each element of
     {user:meal_components}. Return only the list of recipes and nothing else""",
-    output_key="recipe_list",
     tools=[google_search],
+    output_key="recipe_list",
 )
 
-# Root Coordinator: Orchestrates the workflow by calling the sub-agents as tools.
-simple_root_agent = Agent(
-    name="GroceryAssistant",
-    model=Gemini(
-        model="gemini-2.5-flash-lite",
-        retry_options=retry_config
-    ),
-    # This instruction tells the root agent HOW to use its tools (which are the other agents).
-    instruction=""""You are a helpful assistant. Your goal is to plan the groceries 
-    for the week. First you will call ingredients_in_season_agent to get a 
-    list of ingredients, and then you will call a recipe_agent who will create 
-    a list of recipes. You will then display that list of recipes to the user and ask for approval""",
-    # We wrap the sub-agents in `AgentTool` to make them callable tools for the root agent.
-    tools=[AgentTool(ingredients_in_season_agent), AgentTool(recipe_agent)],
+# recipe_verification_agent = Agent(
+#     name="RecipeAgent",
+#     model=Gemini(
+#         model="gemini-2.5-flash-lite",
+#         retry_options=retry_config
+#     ),
+#     instruction="""For each recipe in {recipe_list}, present the user with all 
+#     the ingredients and preparation instructions, if it looks good to them, 
+#     store all the ingredients and preparation instructions. If it doesn't look
+#     good to them, help them make adjustments until they are satisfied and then
+#     store all the ingredients and preparation instructions.
+#     Your final output should be a list, with each item being a complete recipe
+#     that lists all ingredients and preparation instructions""",
+#     tools=[google_search],
+#     output_key="complete_recipe_list",
+# )
+
+grocery_list_agent = LlmAgent(
+    name="GroceryListAgent",
+    model=Gemini(model=MODEL_NAME, retry_options=retry_config),
+    description="Agent that creates a list of all the ingredients present in the " \
+    "recipe list",
+    instruction="You are a helpful grocery assistant. Create a thorough list " \
+    "of all the ingredients you find in {recipe_list} save it using `save_grocery_list` tool",
+    tools=[save_grocery_list]
+
 )
+
+preparation_agent = LlmAgent(
+    name="PreparationAgent",
+    model=Gemini(model=MODEL_NAME, retry_options=retry_config),
+    description="Agent provides the cooking method for each recipe in the " \
+    "recipe list",
+    instruction="You are a careful ledger, gather the recipes save detailed ingredients and preparation " \
+    "instructions in {recipe_list} as a list, each item in the list corresponding to one " \
+    "complete preparation instrction per recipe. Save the list by calling the tool `save_recipe_list`",
+    tools=[save_recipe_list]
+)
+
+new_week_agent = LlmAgent(
+    name="NewWeekAgent",
+    model=Gemini(model=MODEL_NAME, retry_options=retry_config),
+    description="Agent adjust state varaibles when called",
+    instruction="When you are called, you will call `set_new_week` tool and "
+    "set its value to False. For example: set_new_week(False)",
+    tools=[set_new_week]
+)
+
+home_assistant_agent = LlmAgent(
+    name="HomeAssistant",
+    model=Gemini(model=MODEL_NAME, retry_options=retry_config),
+    description="Agent that provides the grocery list or specific recipes whenever the user" \
+    "is ready to do groceries or cook. It also resets the grocery and recipe list parameters " \
+    "if the user requests to start a new week, a new cycle of grocery shopping",
+    instruction="You are a helpful assistant that will help the user if they" \
+    "request the grocery list by using the tool `retrieve_grocery_list`. Show the list" \
+    "as a bulleted list. If they user is getting ready to cook and asks " \
+    "'What should I cook today' or something like that, retrieve recipes using " \
+    "`retrieve_recipe_list` tool and pick one of the recipes and present it to" \
+    "the user in its entirety (ingredidients AND preparation instructions). If the" \
+    "user said they already cook that one or they don't feel like it, show the next one." \
+    "Finally, if the user says something along the lines of: it is a new week" \
+    "cooked all recipes, ready to do groceries again, then call `set_new_week`" \
+    "tool and set it to True. For example: " \
+    "User> Ready for next week" \
+    "HomeAsssistant> set_new_week(True)",
+    tools=[retrieve_grocery_list, retrieve_recipe_list,
+           set_new_week]
+
+)
+
+# # Root Coordinator: Orchestrates the workflow by calling the sub-agents as tools.
+# simple_root_agent = Agent(
+#     name="GroceryAssistant",
+#     model=Gemini(
+#         model="gemini-2.5-flash-lite",
+#         retry_options=retry_config
+#     ),
+#     # This instruction tells the root agent HOW to use its tools (which are the other agents).
+#     instruction=""""You are a helpful assistant. Your goal is to plan the groceries 
+#     for the week. First you will call ingredients_in_season_agent to get a 
+#     list of ingredients, and then you will call a recipe_agent who will create 
+#     a list of recipes. You will then display that list of recipes to the user and ask for approval""",
+#     # We wrap the sub-agents in `AgentTool` to make them callable tools for the root agent.
+#     tools=[AgentTool(ingredients_in_season_agent), AgentTool(recipe_agent)],
+# )
 
 
 onboarding_agent = LlmAgent(
     model=Gemini(model="gemini-2.5-flash-lite", retry_options=retry_config),
     name="OnboardingAgent",
+    description="Agent is a helpful onboarding agent that will welcome the user" \
+    "for first time and ask them questions to learn some basic preferences from them",
     instruction="""You are an onboarding concierge of an app that helps people with their groceries. 
     Your goal is to get to know the user and save key information about them in your memory,
     using the tools below. 
@@ -393,7 +551,7 @@ onboarding_agent = LlmAgent(
 
 recipe_pipeline = SequentialAgent(
     name="RecipePipeline",
-    sub_agents=[ingredients_in_season_agent, recipe_agent]
+    sub_agents=[ingredients_in_season_agent, recipe_agent, grocery_list_agent, preparation_agent, new_week_agent]
 )
 
 
@@ -401,12 +559,14 @@ recipe_pipeline = SequentialAgent(
 class MyTurnBasedAgents(BaseAgent):
     onboarding_agent : LlmAgent
     recipe_pipeline: SequentialAgent
+    home_assistant_agent: LlmAgent
 
     def __init__(
         self,
         name: str,
         onboarding_agent: LlmAgent,
-        recipe_pipeline: SequentialAgent
+        recipe_pipeline: SequentialAgent,
+        home_assistant_agent: LlmAgent
 
     ):
         """Agent that gives spaces to agents who need to talk to users
@@ -418,17 +578,33 @@ class MyTurnBasedAgents(BaseAgent):
         super().__init__(
             name=name,
             onboarding_agent=onboarding_agent,
-            recipe_pipeline=recipe_pipeline
+            recipe_pipeline=recipe_pipeline,
+            home_assistant_agent=home_assistant_agent
         )
     
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         
-        async for event in self.onboarding_agent.run_async(ctx):
-            yield event
         
-        if "user:number_of_meals" in ctx.session.state:
-            async for event in self.recipe_pipeline.run_async(ctx):
+        if (("user:number_of_meals" in ctx.session.state) and
+           ("user:meal_components" in ctx.session.state) and
+            ("user:city" in ctx.session.state)):
+            if (("user:is_new_week" in ctx.session.state) and 
+                (ctx.session.state.get("user:is_new_week", "Fail") == False)):
+                async for event in self.home_assistant_agent.run_async(ctx):
+                    yield event
+            else:
+                async for event in self.recipe_pipeline.run_async(ctx):
+                    yield event
+
+        elif not(("user:number_of_meals" in ctx.session.state) and
+           ("user:meal_components" in ctx.session.state) and
+            ("user:city" in ctx.session.state)):
+            async for event in self.onboarding_agent.run_async(ctx):
                 yield event
+        
+        else:
+            1/0
+        
             
 
         # status = ctx.session.state.get("number_of_meals", "fail")
@@ -437,7 +613,8 @@ class MyTurnBasedAgents(BaseAgent):
 
 root_agent = MyTurnBasedAgents(name="EasyPeasy",
                                onboarding_agent=onboarding_agent,
-                               recipe_pipeline=recipe_pipeline)
+                               recipe_pipeline=recipe_pipeline,
+                               home_assistant_agent=home_assistant_agent)
 
 
 # onboarding_complete_agent = LlmAgent(
