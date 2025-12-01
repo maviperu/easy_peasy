@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 import os
 
 from google.adk.agents.callback_context import CallbackContext
-from google.adk.agents import Agent, SequentialAgent, ParallelAgent, LoopAgent, LlmAgent
+from google.adk.agents import Agent, SequentialAgent, ParallelAgent, LoopAgent, LlmAgent, BaseAgent
 from google.adk.models.google_llm import Gemini
 from google.adk.models import LlmResponse, LlmRequest
 from google.adk.runners import InMemoryRunner, Runner
@@ -10,14 +10,21 @@ from google.adk.tools import AgentTool, FunctionTool, google_search
 from google.genai import types
 from google.adk.tools.tool_context import ToolContext
 from google.adk.sessions import DatabaseSessionService, InMemorySessionService
+from google.adk.agents.invocation_context import InvocationContext
+from google.adk.events import Event, EventActions
+
+
+
 import datetime
 
 from pathlib import Path
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, AsyncGenerator
 import traceback
 
 import sqlite3
+
+
 
 
 # Global
@@ -369,7 +376,7 @@ onboarding_agent = LlmAgent(
     8. Call `save_components_of_meal` tool to save the user response or the example if the user accepted it
     9. Ask them how many meals do they plan to cook per week, assure them they can provide this information at any time
     10.If you get a response, call `save_number_of_meals` tool to save the user response
-    11.We are done!
+    11. Once you got number of meals, create a dictionary with all the values
 
     Tools for managing user context:
     * To record city when provided use `save_city` tool. 
@@ -381,26 +388,76 @@ onboarding_agent = LlmAgent(
     # before_model_callback=skip_onboarding_if_complete,
     tools=[save_city, save_ingredient_to_avoid, save_personal_recipes, 
            save_components_of_meal, save_number_of_meals], 
+    output_key="user_dict"
 )
 
-onboarding_complete_agent = LlmAgent(
-    model=Gemini(model=MODEL_NAME, retry_options=retry_config),
-    name="OnboardCompleteAgent",
-    instruction=""" Use `state_checker` tool to check if onboarding is still needed.
-    If onboarding is not needed, call `exit_loop` tool and respond only
-    with the function call and nothing else. 
-    """,
-    tools=[FunctionTool(exit_loop), FunctionTool(state_checker)]
-
+recipe_pipeline = SequentialAgent(
+    name="RecipePipeline",
+    sub_agents=[ingredients_in_season_agent, recipe_agent]
 )
-        #    FunctionTool(exit_loop)],  # Provide the tools to the agent
 
 
-onboarding_loop = LoopAgent(
-    name="OnboardingLoop",
-    sub_agents=[onboarding_agent],
-    max_iterations=6,  # Prevents infinite loops
-)
+# Custom agent to check the status and escalate if 'pass'
+class MyTurnBasedAgents(BaseAgent):
+    onboarding_agent : LlmAgent
+    recipe_pipeline: SequentialAgent
+
+    def __init__(
+        self,
+        name: str,
+        onboarding_agent: LlmAgent,
+        recipe_pipeline: SequentialAgent
+
+    ):
+        """Agent that gives spaces to agents who need to talk to users
+
+        Args:
+            name (str): Name of the custom agebt
+            agent_that_takes_turns (LlmAgent): name of the agent that needs space.
+        """
+        super().__init__(
+            name=name,
+            onboarding_agent=onboarding_agent,
+            recipe_pipeline=recipe_pipeline
+        )
+    
+    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
+        
+        async for event in self.onboarding_agent.run_async(ctx):
+            yield event
+        
+        if "user:number_of_meals" in ctx.session.state:
+            async for event in self.recipe_pipeline.run_async(ctx):
+                yield event
+            
+
+        # status = ctx.session.state.get("number_of_meals", "fail")
+        # should_stop = (status != "fail")
+        # yield Event(author=self.name, actions=EventActions(escalate=should_stop))
+
+root_agent = MyTurnBasedAgents(name="EasyPeasy",
+                               onboarding_agent=onboarding_agent,
+                               recipe_pipeline=recipe_pipeline)
+
+
+# onboarding_complete_agent = LlmAgent(
+#     model=Gemini(model=MODEL_NAME, retry_options=retry_config),
+#     name="OnboardCompleteAgent",
+#     instruction=""" Use `state_checker` tool to check if onboarding is still needed.
+#     If onboarding is not needed, call `exit_loop` tool and respond only
+#     with the function call and nothing else. 
+#     """,
+#     tools=[FunctionTool(exit_loop), FunctionTool(state_checker)]
+
+# )
+        
+
+
+# onboarding_loop = LoopAgent(
+#     name="OnboardingLoop",
+#     sub_agents=[onboarding_agent, CheckStatusAndEscalate(name="OnboardingChecker")],
+#     max_iterations=6,  # Prevents infinite loops
+# )
 
 # orchestrator_agent = LlmAgent(
 #     name="easy_peasy_agent",
@@ -422,161 +479,23 @@ onboarding_loop = LoopAgent(
 
 # )
 
-# recipe_pipeline = SequentialAgent(
+
+
+# root_agent = SequentialAgent(
 #     name="RecipePipeline",
-#     sub_agents=[ingredients_in_season_agent, recipe_agent]
+#     sub_agents=[MyTurnBasedAgents(name="OnboardingChecker", agent_that_takes_turns=onboarding_agent), ingredients_in_season_agent, recipe_agent]
 # )
 
 
-sequential_root_agent = SequentialAgent(
-    name="RecipePipeline",
-    sub_agents=[onboarding_loop, ingredients_in_season_agent, recipe_agent]
-)
+# root_agent = LlmAgent(
+#     name="root_agent",
+#     model="gemini-2.5-flash-lite",
+#     instruction=(
+#         """You are the easy-peasy grocery assistant.  Your job is to help the 
+#         user as they follow the prompts of the sub_agent. 
+#         As soon as you can, execute the sub_agents and make sure the user
+#         has time to respond"""
+#     ),
+#     sub_agents=[sequential_root_agent]     )
 
 
-root_agent = LlmAgent(
-    name="root_agent",
-    model="gemini-2.5-flash-lite",
-    instruction=(
-        "You are the easy-peasy grocery assistant.  Your job is to help the user"
-        "plan their groceries using the tools in the order below."
-        "O. Welcome the user to easy-peasy groceries!"
-        "1. ** Check state:** call state_checker tool, if it returns onboarding_needed = True"
-        "1a. **Onboard new user:**  call the `onboarding_loop`. tool."
-        "** Make sure to call `onboarding_loop` tool,  DON'T run some random onboarding by yourself. "
-        "2. **Get Ingredients:** If the previous tool result was onboarding_needed = False"
-        "3. **Get recipe:** Call the `recipe_agent` to get a list of recipes."
-        "4. **Confirm with the user:** Show recipes to the user and ask them if they want to change anything"
-        "You MUST only proceed to the next step if the previous step's data is available or completed."
-    ),
-    tools=[
-        AgentTool(onboarding_loop),
-        AgentTool(ingredients_in_season_agent),
-        AgentTool(recipe_agent),
-        FunctionTool(state_checker)
-    ]
-)
-
-# # Creating Memory to save user and session state with local database
-# db_url = 'sqlite+aiosqlite:///easy_peasy_database.db'
-# # session_service = InMemorySessionService()
-# session_service = DatabaseSessionService(db_url=db_url)
-
-# runner = Runner(agent=sequential_root_agent, session_service=session_service, app_name="default")
-
-
-# async def main():
-#     try:  # run_debug() requires ADK Python 1.18 or higher:
-#         await run_session(
-#             runner,
-#             [
-#                 "Hello",
-#                 "Boston",
-#                 "Bell peppers",
-#                 "Lomo Saltado",
-#                 "Yeah, that sounds good",
-#                 "5"
-#             ],
-#             "state-demo-session",
-#         )
-
-#         # Retrieve the session and inspect its state
-#         session = await session_service.get_session(
-#             app_name=APP_NAME, user_id=USER_ID, session_id="state-demo-session"
-#         )
-
-#         print("Session State Contents:")
-#         print(session.state)
-
-
-
-#     except Exception as e:
-#         print(f"An error occurred during agent execution: {e}")
-#         print("\nFull traceback:")
-#         traceback.print_exc()
-    
-
-# # asyncio.run(main())
-
-
-# async def debug_main():
-#     try:  # run_debug() requires ADK Python 1.18 or higher:
-#         response = await runner.run_debug("hello", 
-#                                           user_id=USER_ID,
-#                                           session_id=SESSION,
-#                                           verbose=True)
-        
-#         # Check if there are multiple parts
-#         if hasattr(response, 'candidates'):
-#             for candidate in response.candidates:
-#                 print(f"Candidate content: {candidate.content}")
-#                 if hasattr(candidate.content, 'parts'):
-#                     for part in candidate.content.parts:
-#                         print(f"Part: {part}")
-
-#         # Retrieve the session and inspect its state
-#         session = await session_service.get_session(
-#             app_name=APP_NAME, user_id=USER_ID, session_id=SESSION
-#         )
-
-#         print("Session State Contents:")
-#         print(session.state)
-
-
-
-#     except Exception as e:
-#         print(f"An error occurred during agent execution: {e}")
-#         # print("\nFull traceback:")
-#         traceback.print_exc()
-
-# asyncio.run(debug_main())
-
-
-# async def interactive_test_loop():
-#     print(f"--- Starting Interactive Test ---")
-#     print("Type 'exit' or 'quit' to end the session.")
-
-#     app_name = runner.app_name
-#     try:
-#         session = await session_service.create_session(
-#             app_name=app_name, user_id=USER_ID, session_id=SESSION
-#         )
-#     except:
-#         session = await session_service.get_session(
-#             app_name=app_name, user_id=USER_ID, session_id=SESSION
-#         )
-    
-#     # Run the initial setup (optional first prompt if your agent needs a trigger)
-#     # await send_message("start onboarding") 
-
-#     while True:
-#         user_input = input("\n[user]: ")
-#         if user_input.lower() in ['exit', 'quit']:
-#             break
-
-#         # 3. Package the user input into ADK format
-#         new_message = types.Content(role='user', parts=[types.Part(text=user_input)])
-#         final_response_text = ""
-        
-#         # 4. Execute the agent for the current turn
-#         # The run_async method yields events until the final response is complete
-#         async for event in runner.run_async(
-#             user_id=USER_ID,
-#             session_id=SESSION,
-#             new_message=new_message
-#         ):  
-#             print(f"[{event.author}]: {new_message}")
-#             # Check for the final, generated response event
-#             if event.is_final_response():
-#                 if event.content and event.content.parts:
-#                     final_response_text = event.content.parts[0].text
-#                 break
-
-
-#         print(f"[AGENT]: {final_response_text}")
-
-# # if __name__ == "__main__":
-# #     try:
-# #         asyncio.run(interactive_test_loop())
-# #     except Exception as e:
-# #         print(f"An error occurred: {e}")

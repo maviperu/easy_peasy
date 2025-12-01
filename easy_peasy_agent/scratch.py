@@ -1,3 +1,11 @@
+# from google.adk.agents.llm_agent import Agent
+
+# root_agent = Agent(
+#     model='gemini-2.5-flash-lite',
+#     name='root_agent',
+#     description='A helpful assistant for user questions.',
+#     instruction='Answer user questions to the best of your knowledge',
+# )
 from dotenv import load_dotenv
 import os
 
@@ -46,6 +54,62 @@ USER_NAME_SCOPE_LEVELS = ("temp", "user", "app")
 #############################
 # Creating memory functions
 #############################
+
+def save_user_info(
+        tool_context: ToolContext,
+        city: str,
+        ingredients_to_avoid: List,
+        personal_recipes: List,
+        components_of_meal: str,
+        number_of_meals: int
+) -> Dict[str, Any]:
+    """Tool that saves key information about the user to the session state
+
+    Args:
+        city (str): the city where the user does groceries
+        ingredients_to_avoid (List): List of ingredients the user wants to avoid and never buy in the groceries
+        personal_recipes (List): List of recipes the user likes
+        components_of_meal (str): 3 or 4 items that are required in ever meal, for example: a protein, a vegetable and a starch.
+        number_of_meals (int): Number of meals the user wants to cook each week
+
+    Returns:
+        Dict[str, Any]: dictionary returning status, whether success or failure.
+        if failure, it is likely that one or more values couldn't be saved in the
+        session state. Retrying could help.
+    """
+    tool_context.state["user:city"] = city
+    tool_context.state["user:components_of_meal"] = components_of_meal
+    tool_context.state["user:number_of_meals"] = number_of_meals
+    # Initializing lists if not present, growing them if present
+    if not ("user:ingredients_to_avoid" in tool_context.state):
+        tool_context.state["user:ingredients_to_avoid"] = []
+    tool_context.state["user:ingredients_to_avoid"] += ingredients_to_avoid
+    if not ("user:personal_recipes" in tool_context.state):
+        tool_context.state["user:personal_recipes"] = []
+    tool_context.state["user:personal_recipes"] += personal_recipes
+
+def retrieve_user_info(
+        tool_context: ToolContext,
+) -> Dict[str, Any]:
+    """Tool that retrieves key information about the user from the session state
+
+    Returns:
+    Dict[str, Any]: 
+        city (str): the city where the user does groceries
+        ingredients_to_avoid (List): List of ingredients the user wants to avoid and never buy in the groceries
+        personal_recipes (List): List of recipes the user likes
+        components_of_meal (str): 3 or 4 items that are required in ever meal, for example: a protein, a vegetable and a starch.
+        number_of_meals (int): Number of meals the user wants to cook each week
+    """
+    user_dict = {}
+    user_dict["city"] = tool_context.state["user:city"]
+    user_dict["components_of_meal"] = tool_context.state.get("user:components_of_meal", "Components of meal not found")
+    user_dict["number_of_meals"] = tool_context.state.get("user:number_of_meals", "Number of meals not found")
+    user_dict["ingredients_to_avoid"] = tool_context.state.get("user:ingredients_to_avoid", "Ingredients_to_avoid not found")
+    user_dict["personal_recipes"] = tool_context.state.get("user:personal_recipes", "personal_recipes not found")
+    return user_dict
+
+   
 def save_city(
     tool_context: ToolContext, city: str
 ) -> Dict[str, Any]:
@@ -154,11 +218,14 @@ def state_checker(tool_context: ToolContext
                                   ) -> Dict[str, Any]:
     """
     Tool to make sure onboarding completed smoothly and doesn't need to run again
+    Returns: dict "onboarding_needed"
+    Boolean, if true, onboarding questions are needed to complete the questionnaire
+    if false, the user is all set with the minimum state variables (city, number of meals and meal components)
     """
     for key in ["number_of_meals","meal_components", "city"]: 
         if not ("user:"+key in tool_context.state):
-            return {"status": "success", "onboarding_needed": True}
-    return {"status": "success", "onboarding_needed": False}
+            return {"onboarding_needed": True}
+    return {"onboarding_needed": False}
 #####################
 
 
@@ -336,23 +403,23 @@ recipe_agent = Agent(
 )
 
 # Root Coordinator: Orchestrates the workflow by calling the sub-agents as tools.
-simple_root_agent = Agent(
-    name="GroceryAssistant",
-    model=Gemini(
-        model="gemini-2.5-flash-lite",
-        retry_options=retry_config
-    ),
-    # This instruction tells the root agent HOW to use its tools (which are the other agents).
-    instruction=""""You are a helpful assistant. Your goal is to plan the groceries 
-    for the week. First you will call ingredients_in_season_agent to get a 
-    list of ingredients, and then you will call a recipe_agent who will create 
-    a list of recipes. You will then display that list of recipes to the user and ask for approval""",
-    # We wrap the sub-agents in `AgentTool` to make them callable tools for the root agent.
-    tools=[AgentTool(ingredients_in_season_agent), AgentTool(recipe_agent)],
-)
+# simple_root_agent = Agent(
+#     name="GroceryAssistant",
+#     model=Gemini(
+#         model="gemini-2.5-flash-lite",
+#         retry_options=retry_config
+#     ),
+#     # This instruction tells the root agent HOW to use its tools (which are the other agents).
+#     instruction=""""You are a helpful assistant. Your goal is to plan the groceries 
+#     for the week. First you will call ingredients_in_season_agent to get a 
+#     list of ingredients, and then you will call a recipe_agent who will create 
+#     a list of recipes. You will then display that list of recipes to the user and ask for approval""",
+#     # We wrap the sub-agents in `AgentTool` to make them callable tools for the root agent.
+#     tools=[AgentTool(ingredients_in_season_agent), AgentTool(recipe_agent)],
+# )
 
 
-onboarding_agent = LlmAgent(
+root_agent = LlmAgent(
     model=Gemini(model="gemini-2.5-flash-lite", retry_options=retry_config),
     name="OnboardingAgent",
     instruction="""You are an onboarding concierge of an app that helps people with their groceries. 
@@ -369,7 +436,7 @@ onboarding_agent = LlmAgent(
     8. Call `save_components_of_meal` tool to save the user response or the example if the user accepted it
     9. Ask them how many meals do they plan to cook per week, assure them they can provide this information at any time
     10.If you get a response, call `save_number_of_meals` tool to save the user response
-    11.We are done!
+    11.Use `retrieve_user_info` tool to load te user dictionary and return its values.
 
     Tools for managing user context:
     * To record city when provided use `save_city` tool. 
@@ -380,7 +447,8 @@ onboarding_agent = LlmAgent(
     """,
     # before_model_callback=skip_onboarding_if_complete,
     tools=[save_city, save_ingredient_to_avoid, save_personal_recipes, 
-           save_components_of_meal, save_number_of_meals], 
+           save_components_of_meal, save_number_of_meals, retrieve_user_info], 
+    output_key="user_dict"
 )
 
 onboarding_complete_agent = LlmAgent(
@@ -393,14 +461,49 @@ onboarding_complete_agent = LlmAgent(
     tools=[FunctionTool(exit_loop), FunctionTool(state_checker)]
 
 )
+
+# onboarding_loop = LoopAgent(
+#     name="OnboardingLoop",
+#     sub_agents=[onboarding_agent, onboarding_complete_agent],
+#     max_iterations=6,  # Prevents infinite loops
+# )
+
+# root_agent = SequentialAgent(
+#     name="Groceries_pipeline",
+#     sub_agents=[onboarding_loop, ingredients_in_season_agent, recipe_agent]
+
+# )
+
+# root_agent = LlmAgent(
+#     model=Gemini(model=MODEL_NAME, retry_options=retry_config),
+#     name="EasyPeasyAgent",
+#     instruction="""
+#                     You are a helpful agent that will help users do their groceries
+#                     First you need to use the state_checker tool to see if you need to
+#                     complete oboarding. If `onboarding_needed==True` then 
+#                     ask the user about what city they do groceries, how many 
+#                     meals they want to cook a week, etc, and save this information
+#                     using the save_user_info tool. 
+#                     Once you call state_checker and it returns `onboarding_needed==False`
+#                     Then you can move ahead and get the ingredients in season with
+#                     ingredients_in_season_agent tool and then get the recipes
+#                     with recipe_agent tool. 
+
+#                 """,
+#     tools=[FunctionTool(save_user_info), FunctionTool(retrieve_user_info), 
+#            FunctionTool(state_checker),
+#             AgentTool(ingredients_in_season_agent),
+#             AgentTool(recipe_agent)]
+
+# )
         #    FunctionTool(exit_loop)],  # Provide the tools to the agent
 
 
-onboarding_loop = LoopAgent(
-    name="OnboardingLoop",
-    sub_agents=[onboarding_agent],
-    max_iterations=6,  # Prevents infinite loops
-)
+# onboarding_loop = LoopAgent(
+#     name="OnboardingLoop",
+#     sub_agents=[onboarding_agent],
+#     max_iterations=6,  # Prevents infinite loops
+# )
 
 # orchestrator_agent = LlmAgent(
 #     name="easy_peasy_agent",
@@ -428,155 +531,31 @@ onboarding_loop = LoopAgent(
 # )
 
 
-sequential_root_agent = SequentialAgent(
-    name="RecipePipeline",
-    sub_agents=[onboarding_loop, ingredients_in_season_agent, recipe_agent]
-)
+# sequential_root_agent = SequentialAgent(
+#     name="RecipePipeline",
+#     sub_agents=[onboarding_loop, ingredients_in_season_agent, recipe_agent]
+# )
 
 
-root_agent = LlmAgent(
-    name="root_agent",
-    model="gemini-2.5-flash-lite",
-    instruction=(
-        "You are the easy-peasy grocery assistant.  Your job is to help the user"
-        "plan their groceries using the tools in the order below."
-        "O. Welcome the user to easy-peasy groceries!"
-        "1. ** Check state:** call state_checker tool, if it returns onboarding_needed = True"
-        "1a. **Onboard new user:**  call the `onboarding_loop`. tool."
-        "** Make sure to call `onboarding_loop` tool,  DON'T run some random onboarding by yourself. "
-        "2. **Get Ingredients:** If the previous tool result was onboarding_needed = False"
-        "3. **Get recipe:** Call the `recipe_agent` to get a list of recipes."
-        "4. **Confirm with the user:** Show recipes to the user and ask them if they want to change anything"
-        "You MUST only proceed to the next step if the previous step's data is available or completed."
-    ),
-    tools=[
-        AgentTool(onboarding_loop),
-        AgentTool(ingredients_in_season_agent),
-        AgentTool(recipe_agent),
-        FunctionTool(state_checker)
-    ]
-)
-
-# # Creating Memory to save user and session state with local database
-# db_url = 'sqlite+aiosqlite:///easy_peasy_database.db'
-# # session_service = InMemorySessionService()
-# session_service = DatabaseSessionService(db_url=db_url)
-
-# runner = Runner(agent=sequential_root_agent, session_service=session_service, app_name="default")
-
-
-# async def main():
-#     try:  # run_debug() requires ADK Python 1.18 or higher:
-#         await run_session(
-#             runner,
-#             [
-#                 "Hello",
-#                 "Boston",
-#                 "Bell peppers",
-#                 "Lomo Saltado",
-#                 "Yeah, that sounds good",
-#                 "5"
-#             ],
-#             "state-demo-session",
-#         )
-
-#         # Retrieve the session and inspect its state
-#         session = await session_service.get_session(
-#             app_name=APP_NAME, user_id=USER_ID, session_id="state-demo-session"
-#         )
-
-#         print("Session State Contents:")
-#         print(session.state)
-
-
-
-#     except Exception as e:
-#         print(f"An error occurred during agent execution: {e}")
-#         print("\nFull traceback:")
-#         traceback.print_exc()
-    
-
-# # asyncio.run(main())
-
-
-# async def debug_main():
-#     try:  # run_debug() requires ADK Python 1.18 or higher:
-#         response = await runner.run_debug("hello", 
-#                                           user_id=USER_ID,
-#                                           session_id=SESSION,
-#                                           verbose=True)
-        
-#         # Check if there are multiple parts
-#         if hasattr(response, 'candidates'):
-#             for candidate in response.candidates:
-#                 print(f"Candidate content: {candidate.content}")
-#                 if hasattr(candidate.content, 'parts'):
-#                     for part in candidate.content.parts:
-#                         print(f"Part: {part}")
-
-#         # Retrieve the session and inspect its state
-#         session = await session_service.get_session(
-#             app_name=APP_NAME, user_id=USER_ID, session_id=SESSION
-#         )
-
-#         print("Session State Contents:")
-#         print(session.state)
-
-
-
-#     except Exception as e:
-#         print(f"An error occurred during agent execution: {e}")
-#         # print("\nFull traceback:")
-#         traceback.print_exc()
-
-# asyncio.run(debug_main())
-
-
-# async def interactive_test_loop():
-#     print(f"--- Starting Interactive Test ---")
-#     print("Type 'exit' or 'quit' to end the session.")
-
-#     app_name = runner.app_name
-#     try:
-#         session = await session_service.create_session(
-#             app_name=app_name, user_id=USER_ID, session_id=SESSION
-#         )
-#     except:
-#         session = await session_service.get_session(
-#             app_name=app_name, user_id=USER_ID, session_id=SESSION
-#         )
-    
-#     # Run the initial setup (optional first prompt if your agent needs a trigger)
-#     # await send_message("start onboarding") 
-
-#     while True:
-#         user_input = input("\n[user]: ")
-#         if user_input.lower() in ['exit', 'quit']:
-#             break
-
-#         # 3. Package the user input into ADK format
-#         new_message = types.Content(role='user', parts=[types.Part(text=user_input)])
-#         final_response_text = ""
-        
-#         # 4. Execute the agent for the current turn
-#         # The run_async method yields events until the final response is complete
-#         async for event in runner.run_async(
-#             user_id=USER_ID,
-#             session_id=SESSION,
-#             new_message=new_message
-#         ):  
-#             print(f"[{event.author}]: {new_message}")
-#             # Check for the final, generated response event
-#             if event.is_final_response():
-#                 if event.content and event.content.parts:
-#                     final_response_text = event.content.parts[0].text
-#                 break
-
-
-#         print(f"[AGENT]: {final_response_text}")
-
-# # if __name__ == "__main__":
-# #     try:
-# #         asyncio.run(interactive_test_loop())
-# #     except Exception as e:
-# #         print(f"An error occurred: {e}")
+# some_agent = LlmAgent(
+#     name="some_agent",
+#     model="gemini-2.5-flash-lite",
+#     instruction=(
+#         "You are the easy-peasy grocery assistant.  Your job is to help the user"
+#         "plan their groceries using the tools in the order below."
+#         "O. Welcome the user to easy-peasy groceries!"
+#         "1. ** Check state:** call state_checker tool, if it returns onboarding_needed = True"
+#         "1a. **Onboard new user:**  call the `onboarding_loop`. tool."
+#         "** Make sure to call `onboarding_loop` tool,  DON'T run some random onboarding by yourself. "
+#         "2. **Get Ingredients:** If the previous tool result was onboarding_needed = False"
+#         "3. **Get recipe:** Call the `recipe_agent` to get a list of recipes."
+#         "4. **Confirm with the user:** Show recipes to the user and ask them if they want to change anything"
+#         "You MUST only proceed to the next step if the previous step's data is available or completed."
+#     ),
+#     tools=[
+#         AgentTool(onboarding_loop),
+#         AgentTool(ingredients_in_season_agent),
+#         AgentTool(recipe_agent),
+#         FunctionTool(state_checker)
+#     ]
+# )
